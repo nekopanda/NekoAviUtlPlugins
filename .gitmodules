@@ -1,0 +1,6 @@
+[submodule "bandingMT_simd"]
+	path = bandingMT_simd
+	url = git@bitbucket.org:Nekopanda/bandingmt_simd.git
+[submodule "edgelevelMT"]
+	path = edgelevelMT
+	url = git@bitbucket.org:Nekopanda/edgelevelmt.git
