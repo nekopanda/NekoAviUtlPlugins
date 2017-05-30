@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <stdio.h>
 #include <cuda_runtime.h>
+#include <vector>
 
 #include "kernel.h"
 #include "xor_rand.h"
@@ -73,9 +74,146 @@ namespace cudafilter {
 #define TIMER_END
 #endif
 
+	class TemporalNRInternal {
+	public:
+		TemporalNRInternal(const TemporalNRParam& param)
+			: param(param)
+		{
+			frame_size = param.pitch * param.height;
+			allocFrames(dev_src_frames,
+				param.batchSize + param.temporalDistance * 2, frame_size);
+			allocFrames(dev_dst_frames,
+				param.batchSize, frame_size);
+		}
+		~TemporalNRInternal() {
+			freeFrames(dev_src_frames);
+			freeFrames(dev_dst_frames);
+		}
+		int getFrameSize() const {
+			return frame_size;
+		}
+		const std::vector<PIXEL_YC*>& getSrcFrames() const {
+			return dev_src_frames;
+		}
+		const std::vector<PIXEL_YC*>& getDstFrames() const {
+			return dev_dst_frames;
+		}
+		bool isSame(TemporalNRParam *prm)
+		{
+			if (prm->pitch != param.pitch ||
+				prm->height != param.height ||
+				prm->batchSize != param.batchSize ||
+				prm->temporalDistance != param.temporalDistance) {
+				return false;
+			}
+			return true;
+		}
+
+	private:
+		const TemporalNRParam param;
+		int frame_size;
+		std::vector<PIXEL_YC*> dev_src_frames;
+		std::vector<PIXEL_YC*> dev_dst_frames;
+
+		static void allocFrames(
+			std::vector<PIXEL_YC*>& frames, int nframes, int frame_size)
+		{
+			for (int i = 0; i < nframes; ++i) {
+				void* ptr;
+				CUDA_CHECK(cudaMalloc(&ptr, frame_size * sizeof(PIXEL_YC)));
+				frames.push_back((PIXEL_YC*)ptr);
+			}
+		}
+
+		static void freeFrames(std::vector<PIXEL_YC*>& frames) {
+			for (int i = 0; i < (int)frames.size(); ++i) {
+				CUDA_CHECK(cudaFree(frames[i]));
+			}
+			frames.clear();
+		}
+	};
+
+#pragma region TemporalNRFilter
+
+	TemporalNRKernelParam makeTemporalNRKernelParam(const TemporalNRParam& param, FRAME_INFO* frame_info)
+	{
+		TemporalNRKernelParam ret = param;
+		ret.nframes = param.batchSize + param.temporalDistance * 2;
+		ret.temporalWidth = param.temporalDistance * 2 + 1;
+		if (frame_info) {
+			ret.frame_info = *frame_info;
+		}
+		return ret;
+	}
+
+	TemporalNRFilter::TemporalNRFilter()
+		: data(NULL)
+	{
+#ifdef ENABLE_PERF
+		if (g_timer == NULL) {
+			init_console();
+			g_timer = new PerformanceTimer();
+		}
+#endif
+	}
+	TemporalNRFilter::~TemporalNRFilter()
+	{
+		if (data != NULL) {
+			delete data;
+			data = NULL;
+		}
+	}
+	bool TemporalNRFilter::proc(
+		TemporalNRParam* prm, const FRAME_YV12* src_frames,
+		PIXEL_YCA* const * dst_frames, CUstream_st* stream)
+	{
+		//
+	}
+	bool TemporalNRFilter::proc(
+		TemporalNRParam* prm, PIXEL_YC* const * src_frames,
+		PIXEL_YC* const * dst_frames)
+	{
+		try {
+			TIMER_START;
+			if (data == NULL) {
+				data = new TemporalNRInternal(*prm);
+			}
+			else if (data->isSame(prm) == false) {
+				delete data;
+				data = new TemporalNRInternal(*prm);
+			}
+			TIMER_NEXT;
+			int frame_bytes = data->getFrameSize() * sizeof(PIXEL_YC);
+			auto& dev_src_frames = data->getSrcFrames();
+			auto& dev_dst_frames = data->getDstFrames();
+			for (int i = 0; i < (int)dev_src_frames.size(); ++i) {
+				CUDA_CHECK(cudaMemcpyAsync(
+					dev_src_frames[i], src_frames[i], frame_bytes, cudaMemcpyHostToDevice));
+			}
+			TIMER_NEXT;
+
+			auto paramex = makeTemporalNRKernelParam(*prm, NULL);
+			TIMER_NEXT;
+
+			for (int i = 0; i < (int)dev_dst_frames.size(); ++i) {
+				CUDA_CHECK(cudaMemcpyAsync(
+					dst_frames[i], dev_dst_frames[i], frame_bytes, cudaMemcpyDeviceToHost));
+			}
+			CUDA_CHECK(cudaDeviceSynchronize());
+			TIMER_END;
+			return true;
+		}
+		catch (const char*) {}
+		return false;
+	}
+
+#pragma endregion
+
     class PixelYCA {
     public:
-        PixelYCA(Image info, PIXEL_YC* src, PIXEL_YC* dst) : info(info), src(src), dst(dst) {
+        PixelYCA(Image info, PIXEL_YC* src, PIXEL_YC* dst)
+			: info(info), src(src), dst(dst)
+		{
             int yc_size = info.pitch * info.height;
             int yca_size = info.width * info.height;
 
@@ -84,7 +222,8 @@ namespace cudafilter {
             CUDA_CHECK(cudaMalloc(&dev_ddst, yca_size * sizeof(PIXEL_YCA)));
             CUDA_CHECK(cudaMalloc(&dev_dst, yc_size * sizeof(PIXEL_YC)));
 
-            CUDA_CHECK(cudaMemcpyAsync(dev_src, src, yc_size * sizeof(PIXEL_YC), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(
+				dev_src, src, yc_size * sizeof(PIXEL_YC), cudaMemcpyHostToDevice));
 
             convert_yc_to_yca(dev_dsrc, dev_src, info.pitch, info.width, info.height);
         }
@@ -93,7 +232,8 @@ namespace cudafilter {
 
             convert_yca_to_yc(dev_dst, dev_ddst, info.pitch, info.width, info.height);
 
-            CUDA_CHECK(cudaMemcpy(dst, dev_dst, yc_size * sizeof(PIXEL_YC), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(
+				dst, dev_dst, yc_size * sizeof(PIXEL_YC), cudaMemcpyDeviceToHost));
 
             CUDA_CHECK(cudaFree(dev_src));
             CUDA_CHECK(cudaFree(dev_dsrc));
@@ -197,7 +337,8 @@ namespace cudafilter {
         }
     }
 
-    bool ReduceBandingFilter::proc(BandingParam* prm, PIXEL_YCA* src, PIXEL_YCA* dst, CUstream_st* stream)
+    bool ReduceBandingFilter::proc(
+		BandingParam* prm, PIXEL_YCA* src, PIXEL_YCA* dst, CUstream_st* stream)
     {
         try {
             TIMER_START;
@@ -233,7 +374,8 @@ namespace cudafilter {
                     data = new ReduceBandingInternal(prm);
                 }
                 TIMER_NEXT;
-                reduce_banding(prm, pixelYCA.getdst(), pixelYCA.getsrc(), data->getRand(prm->frame_number), NULL);
+                reduce_banding(prm, pixelYCA.getdst(),
+					pixelYCA.getsrc(), data->getRand(prm->frame_number), NULL);
                 TIMER_NEXT;
             }
             TIMER_END;
@@ -267,7 +409,8 @@ namespace cudafilter {
         // do nothing
     }
 
-    bool EdgeLevelFilter::proc(EdgeLevelParam* prm, PIXEL_YCA* src, PIXEL_YCA* dst, CUstream_st* stream)
+    bool EdgeLevelFilter::proc(
+		EdgeLevelParam* prm, PIXEL_YCA* src, PIXEL_YCA* dst, CUstream_st* stream)
     {
         try {
             TIMER_START;

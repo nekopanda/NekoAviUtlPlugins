@@ -11,6 +11,11 @@
 
 using namespace cudafilter;
 
+//
+// YUVとYC48の変換はAviUtl準拠
+// https://makiuchi-d.github.io/mksoft/doc/aviutlyc.html
+//
+
 static int nblocks(int n, int width) {
     return (n + width - 1) / width;
 }
@@ -53,6 +58,236 @@ void convert_yca_to_yc(PIXEL_YC* yc, PIXEL_YCA* yca, int pitch, int width, int h
     kl_convert_yca_to_yc<<<blocks, threads>>>(yc, yca, pitch, width, height);
 }
 
+#pragma region TemporalNR
+
+static __device__ short4 get_abs_diff(short4 a, short4 b) {
+	short4 diff;
+	diff.x = abs(a.x - b.x);
+	diff.y = abs(a.y - b.y);
+	diff.z = abs(a.z - b.z);
+	return diff;
+}
+
+template <int depth>
+__device__ short4 yuv_to_yc48(int Y, int U, int V)
+{
+	// 8,10bitのときはAviUtlの変換式
+	short4 yc48 = {
+		(short)(((Y * 1197) >> 6) - 299),
+		(short)(((U - 128) * 4681 + 164) >> 8),
+		(short)(((V - 128) * 4681 + 164) >> 8)
+	};
+	return yc48;
+}
+
+template <>
+__device__ short4 yuv_to_yc48<12>(int Y, int U, int V)
+{
+	// 12bitのときはAviUtlの変換式だとオーバーフローするので独自の変換式
+	// 値の差に影響がないように一次式の傾き成分はAviUtlと同じにする
+	short4 yc48 = {
+		(short)((Y * 1197) >> 8),
+		(short)((U * 4681) >> 10),
+		(short)((V * 4681) >> 10)
+	};
+	return yc48;
+}
+
+template <int depth>
+__device__ void yc48_to_yuv(short4 yc48, int& Y, int& U, int& V)
+{
+	// 8,10bitのときはAviUtlの変換式
+	// 変換前後で値の差が出ないようにYの変換式だけ若干修正
+	// TODO: clamp処理
+	Y = ((yc48.x * 219 + 2109) >> 12) + 16;
+	U = (((yc48.y + 2048) * 7 + 66) >> 7) + 16;
+	V = (((yc48.z + 2048) * 7 + 66) >> 7) + 16;
+}
+
+template <>
+__device__ void yc48_to_yuv<12>(short4 yc48, int& Y, int& U, int& V)
+{
+	// 12bitのときはAviUtlの変換式だとオーバーフローするので独自の変換式
+	// TODO: clamp処理
+	Y = (yc48.x * 219 + 629) >> 10;
+	U = (yc48.y * 7 + 21) >> 5;
+	V = (yc48.z * 7 + 21) >> 5;
+}
+
+// AviUtlのYUY2からYC48に変換するときの色差補間専用
+static __device__ short4 get_avg_aviutl(short4 a, short4 b) {
+	short4 avg;
+	avg.x = (a.x + b.x) >> 1;
+	avg.y = (a.y + b.y) >> 1;
+	avg.z = (a.z + b.z) >> 1;
+	return avg;
+}
+
+__constant__ TemporalNRParamEx tnr_param;
+__constant__ FRAME_YV12 src_yv12_frames[TEMPNR_MAX_BATCH + TEMPNR_MAX_DIST * 2];
+__constant__ PIXEL_YC*  src_yc_frames[TEMPNR_MAX_BATCH + TEMPNR_MAX_DIST * 2];
+__constant__ PIXEL_YCA* dst_yca_frames[TEMPNR_MAX_BATCH];
+__constant__ PIXEL_YC* dst_yc_frames[TEMPNR_MAX_BATCH];
+
+template <typename T, bool aviutl, bool check>
+__global__ void kl_temporal_nr()
+{
+	const PIXEL_YC YC_YELLOW = { 3514, -626, 73 };
+	const PIXEL_YC YC_BLACK = { 1013, 0, 0 };
+
+	const int b = threadIdx.y;
+	const int lx = threadIdx.x;
+	const int x = threadIdx.x + blockDim.x * blockIdx.x;
+	const int y = blockIdx.y;
+
+	const int nframes = tnr_param.nframes;
+	const int mid = tnr_param.temporalDistance;
+	const int pitch = tnr_param.pitch;
+	const int width = tnr_param.width;
+	const int temporalWidth = tnr_param.temporalWidth;
+	const int threshY = tnr_param.threshY;
+	const int threshCb = tnr_param.threshCb;
+	const int threshCr = tnr_param.threshCr;
+	const bool interlaced = tnr_param.interlaced;
+	const int lsY = tnr_param.lsY;
+	const int lsU = tnr_param.lsU;
+	const int lsV = tnr_param.lsV;
+
+	// [nframes][32]
+	// CUDAブロックの幅はここの長さの他に色差補間の関係で偶数制約があることに注意
+	extern __shared__ void* s__[];
+	short4 (*pixel_cache)[32] = (short4(*)[32])s__;
+
+	int offY;
+
+	// pixel_cacheにデータを入れる
+	if (aviutl) {
+		if (x < width) {
+			offY = x + pitch * y;
+			for (int i = b; i < nframes; i += blockDim.y) {
+				PIXEL_YC src = src_yc_frames[i][offY];
+				short4 yuv = { src.y, src.cb, src.cr };
+				pixel_cache[i][lx] = yuv;
+			}
+		}
+	}
+	else {
+		// 入力YUVからYC48に変換 //
+
+		// まず奇数画素の色差は右の画素と同じにする（右端だけは左と同じにする）
+		int cy = interlaced ? (((y >> 1) & ~1) | (y & 1)) : (y >> 1);
+		int cx = (x >> 1) + ((x < width - 1) ? (x & 1) : 0);
+		offY = x + lsY * y;
+		int offU = cx + lsU * cy;
+		int offV = cx + lsV * cy;
+		if (x < width) {
+			for (int i = b; i < nframes; i += blockDim.y) {
+				const T* __restrict__ Y = (T*)src_yv12_frames[i].y;
+				const T* __restrict__ U = (T*)src_yv12_frames[i].u;
+				const T* __restrict__ V = (T*)src_yv12_frames[i].v;
+				pixel_cache[i][lx] = yuv_to_yc48(Y[offY], U[offU], V[offV]);
+			}
+		}
+
+		__syncthreads();
+
+		// 奇数画素の色差は左の画素との平均にする
+		if (x < width && (x & 1)) {
+			for (int i = b; i < nframes; i += blockDim.y) {
+				pixel_cache[i][lx] =
+					get_avg_aviutl(pixel_cache[i][lx - 1], pixel_cache[i][lx]);
+			}
+		}
+	}
+
+	__syncthreads();
+
+	if (x < width) {
+		short4 center = pixel_cache[b + mid][lx];
+
+		// 重み合計を計算
+		int pixel_count = 0;
+		for (int i = 0; i < temporalWidth; ++i) {
+			short4 ref = pixel_cache[b + i][lx];
+			short4 diff = get_abs_diff(center, ref);
+			if (diff.x <= threshY && diff.y <= threshCb && diff.z <= threshCr) {
+				++pixel_count;
+			}
+		}
+
+		float factor = 1.f / pixel_count;
+
+		// ピクセル値を算出
+		float dY = 0;
+		float dU = 0;
+		float dV = 0;
+		for (int i = 0; i < temporalWidth; ++i) {
+			short4 ref = pixel_cache[b + i][lx];
+			short4 diff = get_abs_diff(center, ref);
+			if (diff.x <= threshY && diff.y <= threshCb && diff.z <= threshCr) {
+				dY += factor * ref.x;
+				dU += factor * ref.y;
+				dV += factor * ref.z;
+			}
+		}
+
+		if (check && aviutl) {
+			// 画素値が変わったかどうか
+			short4 yca = { (short)rintf(dY), (short)rintf(dU), (short)rintf(dV) };
+			short4 diff = get_abs_diff(yca, center);
+			bool is_changed = (diff.x > 15 || diff.y > 15 || diff.z > 15);
+			dst_yc_frames[b][offY] = is_changed ? YC_YELLOW : YC_BLACK;
+		}
+		else if (aviutl) {
+			// AviUtl互換形式
+			PIXEL_YC yc = { (short)rintf(dY), (short)rintf(dU), (short)rintf(dV) };
+			dst_yc_frames[b][offY] = yc;
+		}
+		else {
+			PIXEL_YCA yca = { (short)rintf(dY), (short)rintf(dU), (short)rintf(dV) };
+			dst_yca_frames[b][offY] = yca;
+		}
+	}
+}
+
+template <typename T, bool aviutl, bool check>
+void run_temporal_nr(const TemporalNRParamEx& param)
+{
+	dim3 threads(32, param.batchSize);
+	dim3 blocks(nblocks(param.width, threads.x), param.height);
+	int shared_size = threads.x*param.nframes*sizeof(short4);
+	kl_temporal_nr<T, aviutl, check> << <threads, blocks, shared_size >> >();
+	CUDA_CHECK(cudaGetLastError());
+	CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void temporal_nr(const TemporalNRKernelParam& param, const FRAME_YV12* src_frames, PIXEL_YCA* const * dst_frames)
+{
+	CUDA_CHECK(cudaMemcpyToSymbol(tnr_param, &param, sizeof(param), 0));
+	CUDA_CHECK(cudaMemcpyToSymbol(src_yv12_frames, &src_frames, sizeof(FRAME_YV12) * param.nframes, 0));
+	CUDA_CHECK(cudaMemcpyToSymbol(dst_yca_frames, &dst_frames, sizeof(PIXEL_YCA*) * param.batchSize, 0));
+
+	if (param.frame_info.depth <= 8) {
+		run_temporal_nr<uint8_t, true, true>(param);
+	}
+	else {
+		run_temporal_nr<uint16_t, true, true>(param);
+	}
+}
+
+void temporal_nr(const TemporalNRKernelParam& param, PIXEL_YC* const * src_frames, PIXEL_YC* const * dst_frames)
+{
+	CUDA_CHECK(cudaMemcpyToSymbol(tnr_param, &param, sizeof(paramex), 0));
+	CUDA_CHECK(cudaMemcpyToSymbol(src_yc_frames, &src_frames, sizeof(PIXEL_YC*) * param.nframes, 0));
+	CUDA_CHECK(cudaMemcpyToSymbol(dst_yc_frames, &dst_frames, sizeof(PIXEL_YC*) * param.batchSize, 0));
+
+	run_temporal_nr<unsigned char, true, true>(param);
+}
+
+#pragma endregion
+
+#pragma region Banding
+
 template <typename T>
 static __device__ T get_min(T a, T b) {
     return a < b ? a : b;
@@ -86,14 +321,6 @@ static __device__ T get_max(T a, T b, T c, T d) {
 // range は0～127以下
 static __device__ char random_range(uint8_t random, char range) {
     return ((((range << 1) + 1) * (int)random) >> 8) - range;
-}
-
-static __device__ short4 get_abs_diff(short4 a, short4 b) {
-    short4 diff;
-    diff.x = abs(a.x - b.x);
-    diff.y = abs(a.y - b.y);
-    diff.z = abs(a.z - b.z);
-    return diff;
 }
 
 static __device__ short4 get_avg(short4 a, short4 b) {
@@ -266,8 +493,6 @@ void reduce_banding(BandingParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev
         }
     };
 
-    cudaStream_t s;
-
     CUDA_CHECK(cudaMemcpyToSymbolAsync(band_prm, prm, sizeof(*prm), 0, cudaMemcpyHostToDevice, stream));
 
     bool blur_first = (prm->sample_mode != 0) && (prm->blur_first != 0);
@@ -284,6 +509,10 @@ void reduce_banding(BandingParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev
         kernel_table[prm->sample_mode][blur_first][yc_and][dither_enable](prm, (short4*)dev_dst, (const short4*)dev_src, dev_rand, stream);
     }
 }
+
+#pragma endregion
+
+#pragma region EdgeLevel
 
 __constant__ EdgeLevelParam edge_prm;
 
@@ -415,3 +644,5 @@ void edgelevel(EdgeLevelParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev_sr
 
     kernel_table[check][interlaced][bw_enable](prm, (short4*)dev_dst, (const short4*)dev_src, stream);
 }
+
+#pragma endregion

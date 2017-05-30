@@ -34,6 +34,15 @@ static void throw_exception_(const char* fmt, ...)
 		} while (0)
 
 
+struct TemporalNRKernelParam : cudafilter::TemporalNRParam {
+	TemporalNRKernelParam(const cudafilter::TemporalNRParam& base)
+		: cudafilter::TemporalNRParam(base) { }
+
+	int nframes;
+	int temporalWidth;
+	cudafilter::FRAME_INFO frame_info;
+};
+
 void convert_yc_to_yca(cudafilter::PIXEL_YCA* yca, cudafilter::PIXEL_YC* yc, int pitch, int width, int height);
 void convert_yca_to_yc(cudafilter::PIXEL_YC* yc, cudafilter::PIXEL_YCA* yca, int pitch, int width, int height);
 void reduce_banding(cudafilter::BandingParam * prm, cudafilter::PIXEL_YCA* dev_dst, const cudafilter::PIXEL_YCA* dev_src, const uint8_t* dev_rand, cudaStream_t stream);
