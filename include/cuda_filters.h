@@ -26,9 +26,9 @@ namespace cudafilter {
     };
 
 	struct FRAME_YV12 {
-		unsigned char* y;
-		unsigned char* u;
-		unsigned char* v;
+		void* y;
+		void* u;
+		void* v;
 	};
 
 	struct FRAME_INFO {

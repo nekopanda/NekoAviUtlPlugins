@@ -58,6 +58,140 @@ void convert_yca_to_yc(PIXEL_YC* yc, PIXEL_YCA* yca, int pitch, int width, int h
     kl_convert_yca_to_yc<<<blocks, threads>>>(yc, yca, pitch, width, height);
 }
 
+#pragma region YUV YC48 Converter
+
+static __device__ int clamp(int v, int minimum, int maximum) {
+	return (v < minimum)
+		? minimum
+		: (v > maximum)
+		? maximum
+		: v;
+}
+
+// 8,10bitのときはAviUtlの変換式
+template <int depth> __device__ int yuv_to_yv48_luma(int Y) {
+	return ((Y * 1197) >> 6) - 299;
+}
+template <int depth> __device__ int yuv_to_yv48_chroma(int UV) {
+	return ((UV - 128) * 4681 + 164) >> 8;
+}
+
+// 12bitのときはAviUtlの変換式だとオーバーフローするので独自の変換式
+// 値の差に影響がないように一次式の傾き成分はAviUtlと同じにする
+template <> __device__ int yuv_to_yv48_luma<12>(int Y) {
+	return (Y * 1197) >> 8;
+}
+template <> __device__ int yuv_to_yv48_chroma<12>(int UV) {
+	return ((UV * 4681) >> 10);
+}
+
+// clamp BT.601, BT.709，BT.2020 はこれでいい。他は知らない
+template <int depth> __device__ int clamp_luma(int v) {
+	return clamp(v, 16 << (depth - 8), 235 << (depth - 8));
+}
+template <int depth> __device__ int clamp_chroma(int v) {
+	return clamp(v, 16 << (depth - 8), 240 << (depth - 8));
+}
+
+// 8,10bitのときはAviUtlの変換式
+// 変換前後で値の差が出ないようにYの変換式だけ若干修正
+template <int depth> __device__ int yc48_to_yuv_luma(int Y) {
+	return clamp_luma<depth>(((Y * 219 + 2109) >> 12) + 16);
+}
+template <int depth> __device__ int yc48_to_yuv_chroma(int UV) {
+	return clamp_chroma<depth>((((UV + 2048) * 7 + 66) >> 7) + 16);
+}
+// 12bitのときはAviUtlの変換式だとオーバーフローするので独自の変換式
+template <> __device__ int yc48_to_yuv_luma<12>(int Y) {
+	return clamp_luma<12>((Y * 219 + 629) >> 10);
+}
+template <> __device__ int yc48_to_yuv_chroma<12>(int UV) {
+	return clamp_chroma<12>((UV * 7 + 21) >> 5);
+}
+
+// AviUtlのYUY2からYC48に変換するときの色差補間専用
+static __device__ int get_avg_aviutl(int a, int b) {
+	return (a + b) >> 1;
+}
+
+template <typename T, int depth, bool interlaced>
+__global__ void kl_convert_yuv_to_yca(
+	const T* __restrict__ Y, const T* __restrict__ U, const T* __restrict__ V,
+	int lsY, int lsU, int lsV,
+	PIXEL_YCA* yca, int pitch, int width, int height)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (x < width && y < height) {
+
+		// まず奇数画素の色差は右の画素と同じにする（右端だけは左と同じにする）
+		int cy = interlaced ? (((y >> 1) & ~1) | (y & 1)) : (y >> 1);
+		int cx = (x >> 1) + ((x < width - 1) ? (x & 1) : 0);
+		int offY = x + lsY * y;
+		int offU = cx + lsU * cy;
+		int offV = cx + lsV * cy;
+
+		int pixY = yuv_to_yc48_luma<depth>(Y[offY]);
+		int pixU = yuv_to_yc48_chroma<depth>(U[offU]);
+		int pixV = yuv_to_yc48_chroma<depth>(V[offV]);
+
+		// 奇数画素の色差は左の画素との平均にする
+		int avgY = get_avg_aviutl(__shfl_up(pixY, 1), pixY);
+		int avgU = get_avg_aviutl(__shfl_up(pixU, 1), pixU);
+		int avgV = get_avg_aviutl(__shfl_up(pixV, 1), pixV);
+
+		if (x & 1) {
+			pixY = avgY;
+			pixU = avgU;
+			pixV = avgV;
+		}
+
+		PIXEL_YCA d = { pixY, pixU, pixV };
+		yca[y * pitch + x] = d;
+	}
+}
+
+template <typename T, int depth, bool interlaced>
+__global__ void kl_convert_yuv_to_yca(
+	const T* __restrict__ Y, const T* __restrict__ U, const T* __restrict__ V,
+	int lsY, int lsU, int lsV,
+	PIXEL_YCA* yca, int pitch, int width, int height)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (x < width && y < height) {
+
+		// まず奇数画素の色差は右の画素と同じにする（右端だけは左と同じにする）
+		int cy = interlaced ? (((y >> 1) & ~1) | (y & 1)) : (y >> 1);
+		int cx = (x >> 1) + ((x < width - 1) ? (x & 1) : 0);
+		int offY = x + lsY * y;
+		int offU = cx + lsU * cy;
+		int offV = cx + lsV * cy;
+
+		int pixY = yuv_to_yc48_luma<depth>(Y[offY]);
+		int pixU = yuv_to_yc48_chroma<depth>(U[offU]);
+		int pixV = yuv_to_yc48_chroma<depth>(V[offV]);
+
+		// 奇数画素の色差は左の画素との平均にする
+		int avgY = get_avg_aviutl(__shfl_up(pixY, 1), pixY);
+		int avgU = get_avg_aviutl(__shfl_up(pixU, 1), pixU);
+		int avgV = get_avg_aviutl(__shfl_up(pixV, 1), pixV);
+
+		if (x & 1) {
+			pixY = avgY;
+			pixU = avgU;
+			pixV = avgV;
+		}
+
+		PIXEL_YCA d = { pixY, pixU, pixV };
+		yca[y * pitch + x] = d;
+	}
+}
+
+#pragma endregion
+
 #pragma region TemporalNR
 
 static __device__ short4 get_abs_diff(short4 a, short4 b) {
@@ -68,62 +202,7 @@ static __device__ short4 get_abs_diff(short4 a, short4 b) {
 	return diff;
 }
 
-template <int depth>
-__device__ short4 yuv_to_yc48(int Y, int U, int V)
-{
-	// 8,10bitのときはAviUtlの変換式
-	short4 yc48 = {
-		(short)(((Y * 1197) >> 6) - 299),
-		(short)(((U - 128) * 4681 + 164) >> 8),
-		(short)(((V - 128) * 4681 + 164) >> 8)
-	};
-	return yc48;
-}
-
-template <>
-__device__ short4 yuv_to_yc48<12>(int Y, int U, int V)
-{
-	// 12bitのときはAviUtlの変換式だとオーバーフローするので独自の変換式
-	// 値の差に影響がないように一次式の傾き成分はAviUtlと同じにする
-	short4 yc48 = {
-		(short)((Y * 1197) >> 8),
-		(short)((U * 4681) >> 10),
-		(short)((V * 4681) >> 10)
-	};
-	return yc48;
-}
-
-template <int depth>
-__device__ void yc48_to_yuv(short4 yc48, int& Y, int& U, int& V)
-{
-	// 8,10bitのときはAviUtlの変換式
-	// 変換前後で値の差が出ないようにYの変換式だけ若干修正
-	// TODO: clamp処理
-	Y = ((yc48.x * 219 + 2109) >> 12) + 16;
-	U = (((yc48.y + 2048) * 7 + 66) >> 7) + 16;
-	V = (((yc48.z + 2048) * 7 + 66) >> 7) + 16;
-}
-
-template <>
-__device__ void yc48_to_yuv<12>(short4 yc48, int& Y, int& U, int& V)
-{
-	// 12bitのときはAviUtlの変換式だとオーバーフローするので独自の変換式
-	// TODO: clamp処理
-	Y = (yc48.x * 219 + 629) >> 10;
-	U = (yc48.y * 7 + 21) >> 5;
-	V = (yc48.z * 7 + 21) >> 5;
-}
-
-// AviUtlのYUY2からYC48に変換するときの色差補間専用
-static __device__ short4 get_avg_aviutl(short4 a, short4 b) {
-	short4 avg;
-	avg.x = (a.x + b.x) >> 1;
-	avg.y = (a.y + b.y) >> 1;
-	avg.z = (a.z + b.z) >> 1;
-	return avg;
-}
-
-__constant__ TemporalNRParamEx tnr_param;
+__constant__ TemporalNRKernelParam tnr_param;
 __constant__ FRAME_YV12 src_yv12_frames[TEMPNR_MAX_BATCH + TEMPNR_MAX_DIST * 2];
 __constant__ PIXEL_YC*  src_yc_frames[TEMPNR_MAX_BATCH + TEMPNR_MAX_DIST * 2];
 __constant__ PIXEL_YCA* dst_yca_frames[TEMPNR_MAX_BATCH];
