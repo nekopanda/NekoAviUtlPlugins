@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio 2013
-VisualStudioVersion = 12.0.40629.0
+# Visual Studio 14
+VisualStudioVersion = 14.0.24720.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "bandingMT_simd", "bandingMT_simd\bandingMT_simd\bandingMT_simd.vcxproj", "{63F085F2-06ED-4816-A15F-F3EA1168AF74}"
 EndProject
@@ -9,7 +9,9 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "edgelevelMT", "edgelevelMT\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "cuda_filters", "cuda_filters\cuda_filters.vcxproj", "{9D6D4331-BED1-42E4-996E-47079CD5C328}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "temporalNR", "temporalNR\temporalNR.vcxproj", "{7B2DECAC-10BD-4C9C-BE9D-1B3498264F30}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "temporalnrCUDA", "temporalnrCUDA\temporalnrCUDA.vcxproj", "{7B2DECAC-10BD-4C9C-BE9D-1B3498264F30}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "yuvemuCUDA", "yuvemuCUDA\yuvemuCUDA.vcxproj", "{96980E8D-C52A-4B37-A9CC-7F56A4430E76}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -81,6 +83,22 @@ Global
 		{7B2DECAC-10BD-4C9C-BE9D-1B3498264F30}.Release|x64.ActiveCfg = Release|Win32
 		{7B2DECAC-10BD-4C9C-BE9D-1B3498264F30}.Release|x86.ActiveCfg = Release|Win32
 		{7B2DECAC-10BD-4C9C-BE9D-1B3498264F30}.Release|x86.Build.0 = Release|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|Mixed Platforms.ActiveCfg = Debug|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|Mixed Platforms.Build.0 = Debug|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|Win32.ActiveCfg = Debug|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|Win32.Build.0 = Debug|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|x64.ActiveCfg = Debug|x64
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|x64.Build.0 = Debug|x64
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|x86.ActiveCfg = Debug|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Debug|x86.Build.0 = Debug|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|Mixed Platforms.ActiveCfg = Release|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|Mixed Platforms.Build.0 = Release|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|Win32.ActiveCfg = Release|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|Win32.Build.0 = Release|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|x64.ActiveCfg = Release|x64
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|x64.Build.0 = Release|x64
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|x86.ActiveCfg = Release|Win32
+		{96980E8D-C52A-4B37-A9CC-7F56A4430E76}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

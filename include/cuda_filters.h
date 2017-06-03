@@ -25,13 +25,13 @@ namespace cudafilter {
         short    a; // 使用しない
     };
 
-	struct FRAME_YV12 {
+	struct FrameYV12 {
 		void* y;
 		void* u;
 		void* v;
 	};
 
-	struct FRAME_INFO {
+	struct FrameInfo {
 		int depth;
 		// 以下の3つはバイト数ではなく要素数
 		int linesizeY;
@@ -44,6 +44,34 @@ namespace cudafilter {
         int width;
         int height;
 	};
+
+    struct YUVtoYCAParam : Image {
+        FrameInfo frame_info;
+        int interlaced;
+    };
+
+    struct YCAtoYUVParam : YUVtoYCAParam {
+        int src_depth;
+        int dither;
+        int seed;
+        int rand_each_frame;
+        int frame_number;
+    };
+
+    class YCAConverterInternal;
+
+    class EXPORT YCAConverter {
+    public:
+        YCAConverter();
+        ~YCAConverter();
+        // src,dstはCUDAメモリ
+        bool toYCA(YUVtoYCAParam* prm, FrameYV12 src, PIXEL_YCA* dst, CUstream_st* stream);
+        bool toYUV(YCAtoYUVParam* prm, FrameYV12 dst, PIXEL_YCA* src, CUstream_st* stream);
+        // src,dstはCPUメモリ
+        bool toYUV(YCAtoYUVParam* prm, PIXEL_YC* src, PIXEL_YC* dst);
+    private:
+        YCAConverterInternal* data;
+    };
 
 	enum TEMPORAL_NR_CONST {
 		TEMPNR_MAX_DIST = 31,
@@ -68,9 +96,8 @@ namespace cudafilter {
 		TemporalNRFilter();
 		~TemporalNRFilter();
 		// src,dstはCUDAメモリ
-		bool proc(TemporalNRParam* param,
-			const FRAME_INFO* frame_info, const FRAME_YV12* src_frames,
-			PIXEL_YCA* const * dst_frames, CUstream_st* stream);
+		bool proc(TemporalNRParam* prm, const FrameYV12* src_frames,
+            PIXEL_YCA* const * dst_frames, CUstream_st* stream);
 		// src,dstはCPUメモリ
 		bool proc(TemporalNRParam* param,
 			PIXEL_YC* const * src_frames, PIXEL_YC* const * dst_frames);
