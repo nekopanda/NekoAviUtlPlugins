@@ -202,6 +202,7 @@ namespace cudafilter {
 #pragma region YCAConverter
 
     YCAConverter::YCAConverter()
+        : data(NULL)
     {
 #ifdef ENABLE_PERF
         if (g_timer == NULL) {
@@ -275,6 +276,7 @@ namespace cudafilter {
             yuv.u = (uint8_t*)yuv.y + prm.width * prm.height;
             yuv.v = (uint8_t*)yuv.u + (prm.width/2) * (prm.height/2);
             TIMER_NEXT;
+            //cudaMemcpy(pixelYCA.getdst(), pixelYCA.getsrc(), prm.width*prm.height*sizeof(PIXEL_YCA), cudaMemcpyDeviceToDevice);
             convert_yca_to_yuv(&prm, yuv, pixelYCA.getsrc(), data->getRand(prm.frame_number), NULL);
             convert_yuv_to_yca(&prm, yuv, pixelYCA.getdst(), NULL);
             TIMER_NEXT;
@@ -406,10 +408,11 @@ namespace cudafilter {
 					dev_src_frames[i], src_frames[i], frame_bytes, cudaMemcpyHostToDevice));
 			}
 			TIMER_NEXT;
-
 			auto paramex = makeTemporalNRKernelParam(*prm, NULL);
-			TIMER_NEXT;
-
+            
+            temporal_nr(paramex, dev_src_frames.data(), dev_dst_frames.data());
+			
+            TIMER_NEXT;
 			for (int i = 0; i < (int)dev_dst_frames.size(); ++i) {
 				CUDA_CHECK(cudaMemcpyAsync(
 					dst_frames[i], dev_dst_frames[i], frame_bytes, cudaMemcpyDeviceToHost));

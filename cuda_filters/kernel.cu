@@ -99,11 +99,20 @@ template <> __device__ int yuv_to_yc48_chroma<12>(int UV) {
 }
 
 // clamp BT.601, BT.709，BT.2020 はこれでいい。他は知らない
+//template <int depth> __device__ int clamp_luma(int v) {
+//	return clamp(v, 16 << (depth - 8), 235 << (depth - 8));
+//}
+//template <int depth> __device__ int clamp_chroma(int v) {
+//	return clamp(v, 16 << (depth - 8), 240 << (depth - 8));
+//}
+
+// 範囲外にあってもそのまま
+// オーバーフローとアンダーフローだけ制限する
 template <int depth> __device__ int clamp_luma(int v) {
-	return clamp(v, 16 << (depth - 8), 235 << (depth - 8));
+	return clamp(v, 0, (1 << depth) - 1);
 }
 template <int depth> __device__ int clamp_chroma(int v) {
-	return clamp(v, 16 << (depth - 8), 240 << (depth - 8));
+	return clamp(v, 0, (1 << depth) - 1);
 }
 
 // 8,10bitのときはAviUtlの変換式
@@ -147,7 +156,7 @@ __global__ void kl_convert_yuv_to_yca(
     bool interlaced,
 	const T* __restrict__ Y, const T* __restrict__ U, const T* __restrict__ V,
 	int lsY, int lsU, int lsV,
-	short4* yca, int pitch, int width, int height)
+	short4* yca, int width, int height)
 {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -155,7 +164,10 @@ __global__ void kl_convert_yuv_to_yca(
     __shared__ int s_pixU[256];
     __shared__ int s_pixV[256];
 
+    // 縦方向クロマは補間しないで同じ値をそのまま入れる
+    // どうせ捨てられるので勘弁
     int cy = interlaced ? (((y >> 1) & ~1) | (y & 1)) : (y >> 1);
+
     // まず奇数画素の色差は右の画素と同じにする（右端だけは左と同じにする）
     int cx = (x >> 1) + ((x < width - 1) ? (x & 1) : 0);
     int offY = x + lsY * y;
@@ -180,7 +192,12 @@ __global__ void kl_convert_yuv_to_yca(
             pixV = get_avg_aviutl(s_pixV[threadIdx.x - 1], pixV);
 		}
         short4 d = { (short)pixY, (short)pixU, (short)pixV };
-		yca[y * pitch + x] = d;
+		yca[y * width + x] = d;
+#if 0
+        if (y == 183 && x == 937) {
+            printf("to_yca: %d -> %d, %d -> %d, %d -> %d\n", Y[offY], pixY, U[offU], pixU, V[offV], pixV);
+        }
+#endif
 	}
 }
 
@@ -193,7 +210,7 @@ void run_convert_yuv_to_yca(YUVtoYCAParam* prm, FrameYV12 yuv, PIXEL_YCA* yca, c
         prm->interlaced != 0,
         (T*)yuv.y, (T*)yuv.u, (T*)yuv.v,
         prm->frame_info.linesizeY, prm->frame_info.linesizeU, prm->frame_info.linesizeV,
-        (short4*)yca, prm->pitch, prm->width, prm->height);
+        (short4*)yca, prm->width, prm->height);
 }
 
 static int depth_index(int depth) {
@@ -222,7 +239,7 @@ __global__ void kl_convert_yca_to_yuv(
     bool interlaced,
     T* Y, T* U, T* V,
     int lsY, int lsU, int lsV,
-    const short4* __restrict__ yca, int pitch, int width, int height,
+    const short4* __restrict__ yca, int width, int height,
     const uint8_t* __restrict__ rand)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -232,24 +249,29 @@ __global__ void kl_convert_yca_to_yuv(
     const int offset = y * width + x;
 
     if (x < width) {
-        int cy = interlaced ? (((y >> 1) & ~1) | (y & 1)) : (y >> 1);
-        int cx = x >> 1;
+        short4 d = yca[y * width + x];
+
         int offY = x + lsY * y;
-        int offU = cx + lsU * cy;
-        int offV = cx + lsV * cy;
-
-        short4 d = yca[y * pitch + x];
-
         int dithY = dither ? random_range(rand[offset + rand_step * 0], 127) : 0;
         Y[offY] = yc48_to_yuv<src_depth, dst_depth>::luma(d.x, dithY);
 
         // 色差は偶数画素のみ
-        if ((x & 1) == 0) {
+        if ((x & 1) == 0 && (interlaced ? (((y + 1) & 2) == 0) : ((y & 1) == 0))) {
+            int cy = y >> 1;
+            int cx = x >> 1;
+            int offU = cx + lsU * cy;
+            int offV = cx + lsV * cy;
             int dithU = dither ? random_range(rand[offset + rand_step * 1], 127) : 0;
             int dithV = dither ? random_range(rand[offset + rand_step * 2], 127) : 0;
             U[offU] = yc48_to_yuv<src_depth, dst_depth>::chroma(d.y, dithU);
             V[offV] = yc48_to_yuv<src_depth, dst_depth>::chroma(d.z, dithV);
         }
+#if 0
+        if (y == 183 && x == 937) {
+            //printf("to_yuv: %d -> %d, %d -> %d, %d -> %d\n", d.x, Y[offY], d.y, U[offU], d.z, V[offV]);
+            printf("to_yuv: %d -> %d\n", d.x, Y[offY]);
+        }
+#endif
     }
 }
 
@@ -262,7 +284,7 @@ void run_convert_yca_to_yuv(YCAtoYUVParam* prm, FrameYV12 yuv, PIXEL_YCA* yca, c
         prm->interlaced != 0,
         (T*)yuv.y, (T*)yuv.u, (T*)yuv.v,
         prm->frame_info.linesizeY, prm->frame_info.linesizeU, prm->frame_info.linesizeV,
-        (short4*)yca, prm->pitch, prm->width, prm->height, rand);
+        (short4*)yca, prm->width, prm->height, rand);
 }
 
 void convert_yca_to_yuv(YCAtoYUVParam* prm, FrameYV12 yuv, PIXEL_YCA* yca, const uint8_t* rand, cudaStream_t stream)
@@ -313,7 +335,7 @@ void temporal_nr_scale_param(TemporalNRParam* prm, int depth)
     prm->threshY <<= shift;
     prm->threshCb <<= shift;
     prm->threshCr <<= shift;
-    prm->thresh <<= shift;
+    prm->checkThresh <<= shift;
 }
 
 template <typename T, int depth, bool aviutl, bool check>
@@ -339,6 +361,7 @@ __global__ void kl_temporal_nr()
 	const int lsY = tnr_param.frame_info.linesizeY;
 	const int lsU = tnr_param.frame_info.linesizeU;
 	const int lsV = tnr_param.frame_info.linesizeV;
+    const int checkThresh = tnr_param.checkThresh;
 
 	// [nframes][32]
 	// CUDAブロックの幅はここの長さの他に色差補間の関係で偶数制約があることに注意
@@ -433,7 +456,7 @@ __global__ void kl_temporal_nr()
 			// 画素値が変わったかどうか
 			short4 yca = { (short)rintf(dY), (short)rintf(dU), (short)rintf(dV) };
 			short4 diff = get_abs_diff(yca, center);
-			bool is_changed = (diff.x > 15 || diff.y > 15 || diff.z > 15);
+			bool is_changed = (diff.x > checkThresh || diff.y > checkThresh || diff.z > checkThresh);
 			dst_yc_frames[b][offY] = is_changed ? YC_YELLOW : YC_BLACK;
 		}
 		else if (aviutl) {
@@ -449,21 +472,24 @@ __global__ void kl_temporal_nr()
 }
 
 template <typename T, int depth, bool aviutl, bool check>
-void run_temporal_nr(const TemporalNRKernelParam& param)
+void run_temporal_nr(const TemporalNRKernelParam& param, cudaStream_t stream)
 {
 	dim3 threads(32, param.batchSize);
 	dim3 blocks(nblocks(param.width, threads.x), param.height);
 	int shared_size = threads.x*param.nframes*sizeof(short4);
-	kl_temporal_nr<T, depth, aviutl, check> << <threads, blocks, shared_size >> >();
+	kl_temporal_nr<T, depth, aviutl, check> << <blocks, threads, shared_size, stream >> >();
 	CUDA_CHECK(cudaGetLastError());
 	CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-void temporal_nr(const TemporalNRKernelParam& param, const FrameYV12* src_frames, PIXEL_YCA* const * dst_frames)
+void temporal_nr(const TemporalNRKernelParam& param, const FrameYV12* src_frames, PIXEL_YCA* const * dst_frames, cudaStream_t stream)
 {
-	CUDA_CHECK(cudaMemcpyToSymbol(tnr_param, &param, sizeof(param), 0));
-	CUDA_CHECK(cudaMemcpyToSymbol(src_yv12_frames, &src_frames, sizeof(FrameYV12) * param.nframes, 0));
-	CUDA_CHECK(cudaMemcpyToSymbol(dst_yca_frames, &dst_frames, sizeof(PIXEL_YCA*) * param.batchSize, 0));
+	CUDA_CHECK(cudaMemcpyToSymbolAsync(tnr_param, &param,
+        sizeof(param), 0, cudaMemcpyHostToDevice, stream));
+	CUDA_CHECK(cudaMemcpyToSymbolAsync(src_yv12_frames, src_frames,
+        sizeof(FrameYV12) * param.nframes, 0, cudaMemcpyHostToDevice, stream));
+	CUDA_CHECK(cudaMemcpyToSymbolAsync(dst_yca_frames, dst_frames,
+        sizeof(PIXEL_YCA*) * param.batchSize, 0, cudaMemcpyHostToDevice, stream));
 
     if (param.check) {
         throw_exception_("Check mode is only available on AviUtl mode");
@@ -471,13 +497,13 @@ void temporal_nr(const TemporalNRKernelParam& param, const FrameYV12* src_frames
     else {
         switch (param.frame_info.depth) {
         case 8:
-            run_temporal_nr<uint8_t, 8, false, false>(param);
+            run_temporal_nr<uint8_t, 8, false, false>(param, stream);
             break;
         case 10:
-            run_temporal_nr<uint16_t, 10, false, false>(param);
+            run_temporal_nr<uint16_t, 10, false, false>(param, stream);
             break;
         case 12:
-            run_temporal_nr<uint16_t, 12, false, false>(param);
+            run_temporal_nr<uint16_t, 12, false, false>(param, stream);
             break;
         default:
             throw_exception_("Unsupported color depth");
@@ -489,14 +515,14 @@ void temporal_nr(const TemporalNRKernelParam& param, const FrameYV12* src_frames
 void temporal_nr(const TemporalNRKernelParam& param, PIXEL_YC* const * src_frames, PIXEL_YC* const * dst_frames)
 {
 	CUDA_CHECK(cudaMemcpyToSymbol(tnr_param, &param, sizeof(param), 0));
-	CUDA_CHECK(cudaMemcpyToSymbol(src_yc_frames, &src_frames, sizeof(PIXEL_YC*) * param.nframes, 0));
-	CUDA_CHECK(cudaMemcpyToSymbol(dst_yc_frames, &dst_frames, sizeof(PIXEL_YC*) * param.batchSize, 0));
+	CUDA_CHECK(cudaMemcpyToSymbol(src_yc_frames, src_frames, sizeof(PIXEL_YC*) * param.nframes, 0));
+	CUDA_CHECK(cudaMemcpyToSymbol(dst_yc_frames, dst_frames, sizeof(PIXEL_YC*) * param.batchSize, 0));
 
     if (param.check) {
-        run_temporal_nr<uint8_t, 8, true, true>(param);
+        run_temporal_nr<uint8_t, 8, true, true>(param, NULL);
     }
     else {
-        run_temporal_nr<uint8_t, 8, true, false>(param);
+        run_temporal_nr<uint8_t, 8, true, false>(param, NULL);
     }
 }
 

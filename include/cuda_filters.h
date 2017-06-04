@@ -40,7 +40,7 @@ namespace cudafilter {
 	};
 
     struct Image {
-        int pitch;
+        int pitch; // PIXEL_YCでのみ有効（PIXEL_YCAはパディングなし）
         int width;
         int height;
 	};
@@ -84,7 +84,7 @@ namespace cudafilter {
 		int threshCb;
 		int threshCr;
 		int batchSize;
-		int thresh;
+		int checkThresh;
 		bool interlaced;
 		bool check;
 	};

@@ -1,0 +1,4 @@
+LIBRARY yuvemuCUDA.auf
+
+EXPORTS
+    GetFilterTable @1

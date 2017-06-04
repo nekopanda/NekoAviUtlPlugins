@@ -1,0 +1,5 @@
+LIBRARY temporalnrCUDA.auf
+
+EXPORTS
+    GetFilterTable @1
+

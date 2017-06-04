@@ -55,7 +55,7 @@ void convert_yca_to_yuv(cudafilter::YCAtoYUVParam* prm, cudafilter::FrameYV12 yu
 
 // 時間軸ノイズリダクション
 void temporal_nr_scale_param(cudafilter::TemporalNRParam* prm, int depth);
-void temporal_nr(const TemporalNRKernelParam& param, const cudafilter::FrameYV12* src_frames, cudafilter::PIXEL_YCA* const * dst_frames);
+void temporal_nr(const TemporalNRKernelParam& param, const cudafilter::FrameYV12* src_frames, cudafilter::PIXEL_YCA* const * dst_frames, cudaStream_t stream);
 void temporal_nr(const TemporalNRKernelParam& param, cudafilter::PIXEL_YC* const * src_frames, cudafilter::PIXEL_YC* const * dst_frames);
 
 // バンディング低減

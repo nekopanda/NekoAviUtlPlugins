@@ -25,14 +25,14 @@ enum {
 //        フィルタ構造体定義
 //---------------------------------------------------------------------
 #define    TRACK_N    6                                                                                    //  トラックバーの数
-TCHAR    *track_name[] = { "フレーム距離", "Y", "Cb", "Cr", "バッチサイズ", "閾値(test)" };    //  トラックバーの名前
+TCHAR    *track_name[] = { "ﾌﾚｰﾑ距離", "Y", "Cb", "Cr", "ﾊﾞｯﾁｻｲｽﾞ", "判定閾値" };    //  トラックバーの名前
 int        track_default[] = { 15, 8, 8, 8, 8, 8 };    //  トラックバーの初期値
 int        track_s[] = { 1, 0, 0, 0, 1, 0 };    //  トラックバーの下限値
 int        track_e[] = { TEMPNR_MAX_DIST, 31, 31, 31, TEMPNR_MAX_BATCH, 31 };    //  トラックバーの上限値
 
-#define    CHECK_N    3                                                                   //  チェックボックスの数
-TCHAR    *check_name[] = { "フィールド処理", "判定表示", "CUDA" }; //  チェックボックスの名前
-int         check_default[] = { 0, 0, 1 };    //  チェックボックスの初期値 (値は0か1)
+#define    CHECK_N    2                                                                   //  チェックボックスの数
+TCHAR    *check_name[] = { "判定表示", "CUDA" }; //  チェックボックスの名前
+int         check_default[] = { 0, 1 };    //  チェックボックスの初期値 (値は0か1)
 
 FILTER_DLL filter = {
 	FILTER_FLAG_EX_INFORMATION,    //    フィルタのフラグ
@@ -78,18 +78,18 @@ FILTER_DLL filter = {
 };
 
 static TemporalNRParam readSetting(FILTER* fp, FILTER_PROC_INFO *fpip) {
-	TemporalNRParam s;
+	TemporalNRParam s = TemporalNRParam();
 	s.pitch = fpip->max_w;
 	s.width = fpip->w;
 	s.height = fpip->h;
 	s.temporalDistance = fp->track[0];
-	s.threshY = fp->track[1];
-	s.threshCb = fp->track[2];
-	s.threshCr = fp->track[3];
+	s.threshY = fp->track[1] * 2;
+	s.threshCb = fp->track[2] * 2;
+	s.threshCr = fp->track[3] * 2;
 	s.batchSize = fp->track[4];
-	s.thresh = fp->track[5];
-	s.interlaced = (fp->check[0] != 0);
-	s.check = (fp->check[1] != 0);
+	s.checkThresh = fp->track[5] * 2;
+	s.interlaced = false;
+	s.check = (fp->check[0] != 0);
 	return s;
 }
 
@@ -130,7 +130,8 @@ private:
 
 static int cache_frame_block_idx_;
 static TemporalNRFrameCache* cache_ = NULL;
-static TemporalNRFilter* filter_ = NULL;
+static TemporalNRFilter* cuda_filter = NULL;
+static TemporalNRParam param_ = TemporalNRParam();
 
 //---------------------------------------------------------------------
 //        フィルタ構造体のポインタを渡す関数
@@ -150,9 +151,9 @@ BOOL func_exit(FILTER *fp) {
 		delete cache_;
 		cache_ = NULL;
 	}
-	if (filter_ != NULL) {
-		delete filter_;
-		filter_ = NULL;
+	if (cuda_filter != NULL) {
+		delete cuda_filter;
+        cuda_filter = NULL;
 	}
 	return TRUE;
 }
@@ -160,6 +161,20 @@ BOOL func_exit(FILTER *fp) {
 //---------------------------------------------------------------------
 //        フィルタ処理関数
 //---------------------------------------------------------------------
+
+static bool operator!=(const TemporalNRParam& a, const TemporalNRParam& b) {
+    return a.pitch != b.pitch ||
+        a.width != b.width ||
+        a.height != b.height ||
+        a.temporalDistance != b.temporalDistance ||
+        a.threshY != b.threshY ||
+        a.threshCb != b.threshCb ||
+        a.threshCr != b.threshCr ||
+        a.batchSize != b.batchSize ||
+        a.checkThresh != b.checkThresh ||
+        a.interlaced != b.interlaced ||
+        a.check != b.check;
+}
 
 BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip)
 {
@@ -173,6 +188,10 @@ BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip)
 		cache_ = new TemporalNRFrameCache(param);
 		cache_frame_block_idx_ = -1;
 	}
+    else if (param != param_) {
+        cache_frame_block_idx_ = -1;
+    }
+    param_ = param;
 
 	int frame_block_idx = fpip->frame / param.batchSize;
 	if (cache_frame_block_idx_ != frame_block_idx) {
@@ -180,7 +199,9 @@ BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip)
 		
 		// キャッシュ必要枚数を設定
 		int n_src_cache = param.batchSize + param.temporalDistance * 2 + 8;
-		fp->exfunc->set_ycp_filtering_cache_size(fp, fpip->max_w, fpip->h, n_src_cache, NULL);
+        if (!fp->exfunc->set_ycp_filtering_cache_size(fp, fpip->max_w, fpip->h, n_src_cache, NULL)) {
+            return FALSE;
+        }
 
 		// ソースフレームを取得
 		std::vector<cudafilter::PIXEL_YC*> src_frames;
@@ -189,24 +210,28 @@ BOOL func_proc(FILTER *fp, FILTER_PROC_INFO *fpip)
 			int fidx = std::max(0, std::min(fpip->frame_n, base_frame_idx + i));
 			int w, h;
 			PIXEL_YC* frame_ptr = fp->exfunc->get_ycp_filtering_cache_ex(fp, fpip->editp, fidx, &w, &h);
+            if (frame_ptr == NULL) {
+                // メモリ不足
+                printf("メモリ不足(キャッシュ%d枚)\n", n_src_cache);
+                return FALSE;
+            }
 			src_frames.push_back((cudafilter::PIXEL_YC*)frame_ptr);
 		}
 
 		// 実行
 		auto& dst_frames = cache_->getFrames();
 
-		if (filter_ == NULL) {
-			filter_ = new TemporalNRFilter();
+		if (cuda_filter == NULL) {
+            cuda_filter = new TemporalNRFilter();
 		}
-		filter_->proc(&param, src_frames.data(), dst_frames.data());
+        cuda_filter->proc(&param, src_frames.data(), dst_frames.data());
 
 		cache_frame_block_idx_ = frame_block_idx;
 	}
 
 	int frame_idx = fpip->frame % param.batchSize;
 	cudafilter::PIXEL_YC* ptr = cache_->getFrames()[frame_idx];
-	memcpy(fpip->ycp_temp, ptr, fpip->max_w * fpip->h);
-	std::swap(fpip->ycp_edit, fpip->ycp_temp);
+	memcpy(fpip->ycp_edit, ptr, fpip->max_w * fpip->h * sizeof(PIXEL_YC));
 	
 	return TRUE;
 }
