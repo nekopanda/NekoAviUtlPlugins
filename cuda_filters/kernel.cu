@@ -319,7 +319,6 @@ static __device__ short4 get_abs_diff(short4 a, short4 b) {
 	return diff;
 }
 
-__constant__ TemporalNRKernelParam tnr_param;
 __constant__ FrameYV12 src_yv12_frames[TEMPNR_MAX_BATCH + TEMPNR_MAX_DIST * 2];
 __constant__ PIXEL_YC*  src_yc_frames[TEMPNR_MAX_BATCH + TEMPNR_MAX_DIST * 2];
 __constant__ PIXEL_YCA* dst_yca_frames[TEMPNR_MAX_BATCH];
@@ -339,7 +338,7 @@ void temporal_nr_scale_param(TemporalNRParam* prm, int depth)
 }
 
 template <typename T, int depth, bool aviutl, bool check>
-__global__ void kl_temporal_nr()
+__global__ void kl_temporal_nr(TemporalNRKernelParam prm)
 {
 	const PIXEL_YC YC_YELLOW = { 3514, -626, 73 };
 	const PIXEL_YC YC_BLACK = { 1013, 0, 0 };
@@ -349,19 +348,19 @@ __global__ void kl_temporal_nr()
 	const int x = threadIdx.x + blockDim.x * blockIdx.x;
 	const int y = blockIdx.y;
 
-	const int nframes = tnr_param.nframes;
-	const int mid = tnr_param.temporalDistance;
-	const int pitch = tnr_param.pitch;
-	const int width = tnr_param.width;
-	const int temporalWidth = tnr_param.temporalWidth;
-	const int threshY = tnr_param.threshY;
-	const int threshCb = tnr_param.threshCb;
-	const int threshCr = tnr_param.threshCr;
-	const bool interlaced = tnr_param.interlaced;
-	const int lsY = tnr_param.frame_info.linesizeY;
-	const int lsU = tnr_param.frame_info.linesizeU;
-	const int lsV = tnr_param.frame_info.linesizeV;
-    const int checkThresh = tnr_param.checkThresh;
+	const int nframes = prm.nframes;
+	const int mid = prm.temporalDistance;
+	const int pitch = prm.pitch;
+	const int width = prm.width;
+	const int temporalWidth = prm.temporalWidth;
+	const int threshY = prm.threshY;
+	const int threshCb = prm.threshCb;
+	const int threshCr = prm.threshCr;
+	const bool interlaced = prm.interlaced;
+	const int lsY = prm.frame_info.linesizeY;
+	const int lsU = prm.frame_info.linesizeU;
+	const int lsV = prm.frame_info.linesizeV;
+    const int checkThresh = prm.checkThresh;
 
 	// [nframes][32]
 	// CUDAブロックの幅はここの長さの他に色差補間の関係で偶数制約があることに注意
@@ -477,15 +476,13 @@ void run_temporal_nr(const TemporalNRKernelParam& param, cudaStream_t stream)
 	dim3 threads(32, param.batchSize);
 	dim3 blocks(nblocks(param.width, threads.x), param.height);
 	int shared_size = threads.x*param.nframes*sizeof(short4);
-	kl_temporal_nr<T, depth, aviutl, check> << <blocks, threads, shared_size, stream >> >();
+	kl_temporal_nr<T, depth, aviutl, check> << <blocks, threads, shared_size, stream >> >(param);
 	CUDA_CHECK(cudaGetLastError());
 	CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void temporal_nr(const TemporalNRKernelParam& param, const FrameYV12* src_frames, PIXEL_YCA* const * dst_frames, cudaStream_t stream)
 {
-	CUDA_CHECK(cudaMemcpyToSymbolAsync(tnr_param, &param,
-        sizeof(param), 0, cudaMemcpyHostToDevice, stream));
 	CUDA_CHECK(cudaMemcpyToSymbolAsync(src_yv12_frames, src_frames,
         sizeof(FrameYV12) * param.nframes, 0, cudaMemcpyHostToDevice, stream));
 	CUDA_CHECK(cudaMemcpyToSymbolAsync(dst_yca_frames, dst_frames,
@@ -514,7 +511,6 @@ void temporal_nr(const TemporalNRKernelParam& param, const FrameYV12* src_frames
 
 void temporal_nr(const TemporalNRKernelParam& param, PIXEL_YC* const * src_frames, PIXEL_YC* const * dst_frames)
 {
-	CUDA_CHECK(cudaMemcpyToSymbol(tnr_param, &param, sizeof(param), 0));
 	CUDA_CHECK(cudaMemcpyToSymbol(src_yc_frames, src_frames, sizeof(PIXEL_YC*) * param.nframes, 0));
 	CUDA_CHECK(cudaMemcpyToSymbol(dst_yc_frames, dst_frames, sizeof(PIXEL_YC*) * param.batchSize, 0));
 
@@ -575,8 +571,6 @@ static __device__ short4 get_avg(short4 a, short4 b, short4 c, short4 d) {
     return avg;
 }
 
-__constant__ BandingParam band_prm;
-
 void reduce_banding_scale_param(BandingParam* prm, int depth)
 {
     int shift = depth_scale_factor(depth);
@@ -592,21 +586,22 @@ void reduce_banding_scale_param(BandingParam* prm, int depth)
 }
 
 __device__ void dev_reduce_banding(
+    BandingParam prm,
     bool check, int sample_mode, bool blur_first, bool yc_and, bool dither_enable,
     short4* __restrict__ dst, const short4* __restrict__ src, const uint8_t* __restrict__ rand)
 {
     const short4 YC_YELLOW = { 3514, -626,    73 };
     const short4 YC_BLACK = { 1013,    0,     0 };
 
-    const int ditherY = band_prm.ditherY;
-    const int ditherC = band_prm.ditherC;
-    const int width = band_prm.width;
-    const int height = band_prm.height;
-    const int range = band_prm.range;
-    const int threshold_y = band_prm.threshold_y;
-    const int threshold_cb = band_prm.threshold_cb;
-    const int threshold_cr = band_prm.threshold_cr;
-    const int field_mask = band_prm.interlaced ? 0xfe : 0xff;
+    const int ditherY = prm.ditherY;
+    const int ditherC = prm.ditherC;
+    const int width = prm.width;
+    const int height = prm.height;
+    const int range = prm.range;
+    const int threshold_y = prm.threshold_y;
+    const int threshold_cb = prm.threshold_cb;
+    const int threshold_cr = prm.threshold_cr;
+    const int field_mask = prm.interlaced ? 0xfe : 0xff;
 
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -692,16 +687,17 @@ __device__ void dev_reduce_banding(
 }
 
 template <int sample_mode, bool blur_first, bool yc_and, bool dither_enable>
-__global__ void kl_reduce_banding(short4* __restrict__ dst, const short4* __restrict__ src, const uint8_t* __restrict__ rand)
+__global__ void kl_reduce_banding(BandingParam prm, short4* __restrict__ dst, const short4* __restrict__ src, const uint8_t* __restrict__ rand)
 {
-    dev_reduce_banding(false, sample_mode, blur_first, yc_and, dither_enable, dst, src, rand);
+    dev_reduce_banding(prm, false, sample_mode, blur_first, yc_and, dither_enable, dst, src, rand);
 }
 
 __global__ void kl_reduce_banding_check(
+    BandingParam prm,
     int sample_mode, bool blur_first, bool yc_and, bool dither_enable,
     short4* __restrict__ dst, const short4* __restrict__ src, const uint8_t* __restrict__ rand)
 {
-    dev_reduce_banding(true, sample_mode, blur_first, yc_and, dither_enable, dst, src, rand);
+    dev_reduce_banding(prm, true, sample_mode, blur_first, yc_and, dither_enable, dst, src, rand);
 }
 
 template <int sample_mode, bool blur_first, bool yc_and, bool dither_enable>
@@ -710,7 +706,7 @@ void run_reduce_banding(BandingParam * prm, short4* dev_dst, const short4* dev_s
     dim3 threads(32, 16);
     dim3 blocks(nblocks(prm->width, threads.x), nblocks(prm->height, threads.y));
     kl_reduce_banding<sample_mode, blur_first, yc_and, dither_enable>
-        <<<blocks, threads, 0, stream >>>(dev_dst, dev_src, dev_rand);
+        <<<blocks, threads, 0, stream >>>(*prm, dev_dst, dev_src, dev_rand);
 }
 
 void reduce_banding(BandingParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev_src, const uint8_t* dev_rand, cudaStream_t stream)
@@ -743,8 +739,6 @@ void reduce_banding(BandingParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev
         }
     };
 
-    CUDA_CHECK(cudaMemcpyToSymbolAsync(band_prm, prm, sizeof(*prm), 0, cudaMemcpyHostToDevice, stream));
-
     bool blur_first = (prm->sample_mode != 0) && (prm->blur_first != 0);
     bool yc_and = (prm->yc_and != 0);
     bool dither_enable = (prm->sample_mode != 0) && (prm->ditherY > 0 || prm->ditherC > 0);
@@ -753,7 +747,7 @@ void reduce_banding(BandingParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev
         dim3 threads(32, 16);
         dim3 blocks(nblocks(prm->width, threads.x), nblocks(prm->height, threads.y));
         kl_reduce_banding_check<<<blocks, threads, 0, stream >>>(
-            prm->sample_mode, blur_first, yc_and, dither_enable, (short4*)dev_dst, (const short4*)dev_src, dev_rand);
+            *prm, prm->sample_mode, blur_first, yc_and, dither_enable, (short4*)dev_dst, (const short4*)dev_src, dev_rand);
     }
     else {
         kernel_table[prm->sample_mode][blur_first][yc_and][dither_enable](prm, (short4*)dev_dst, (const short4*)dev_src, dev_rand, stream);
@@ -763,8 +757,6 @@ void reduce_banding(BandingParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev
 #pragma endregion
 
 #pragma region EdgeLevel
-
-__constant__ EdgeLevelParam edge_prm;
 
 void edgelevel_scale_param(EdgeLevelParam* prm, int depth)
 {
@@ -780,7 +772,7 @@ void edgelevel_scale_param(EdgeLevelParam* prm, int depth)
 }
 
 template <bool check, bool interlaced, bool bw_enable>
-__global__ void kl_edgelevel(short4* __restrict__ dst, const short4* __restrict__ src)
+__global__ void kl_edgelevel(EdgeLevelParam prm, short4* __restrict__ dst, const short4* __restrict__ src)
 {
     const short4 YC_ORANGE = { 2255, -836,  1176 }; //調整 - 明 - 白補正対象
     const short4 YC_YELLOW = { 3514, -626,    73 }; //調整 - 明
@@ -788,12 +780,12 @@ __global__ void kl_edgelevel(short4* __restrict__ dst, const short4* __restrict_
     const short4 YC_BLUE = { 1900, 1240,  -230 }; //調整 - 暗 - 黒補正対象
     const short4 YC_BLACK = { 1013,    0,     0 }; //エッジでない
 
-    const int width = edge_prm.width;
-    const int height = edge_prm.height;
-    const int str = edge_prm.str;
-    const int thrs = edge_prm.thrs;
-    const int bc = edge_prm.bc;
-    const int wc = edge_prm.wc;
+    const int width = prm.width;
+    const int height = prm.height;
+    const int str = prm.str;
+    const int thrs = prm.thrs;
+    const int bc = prm.bc;
+    const int wc = prm.wc;
 
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -883,7 +875,7 @@ void run_edgelevel(EdgeLevelParam * prm, short4* dev_dst, const short4* dev_src,
 {
     dim3 threads(32, 16);
     dim3 blocks(nblocks(prm->width, threads.x), nblocks(prm->height, threads.y));
-    kl_edgelevel<check, interlaced, bw_enable> << <blocks, threads, 0, stream>> >(dev_dst, dev_src);
+    kl_edgelevel<check, interlaced, bw_enable> << <blocks, threads, 0, stream>> >(*prm, dev_dst, dev_src);
 }
 
 void edgelevel(EdgeLevelParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev_src, cudaStream_t stream)
@@ -898,8 +890,6 @@ void edgelevel(EdgeLevelParam * prm, PIXEL_YCA* dev_dst, const PIXEL_YCA* dev_sr
             { run_edgelevel<true, true, false>, run_edgelevel<true, true, true> }
         }
     };
-
-    CUDA_CHECK(cudaMemcpyToSymbolAsync(edge_prm, prm, sizeof(*prm), 0, cudaMemcpyHostToDevice, stream));
 
     bool check = (prm->check != 0);
     bool interlaced = (prm->interlaced != 0);
