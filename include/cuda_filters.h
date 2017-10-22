@@ -96,7 +96,8 @@ namespace cudafilter {
 		TemporalNRFilter();
 		~TemporalNRFilter();
 		// src,dstÇÕCUDAÉÅÉÇÉä
-		bool proc(TemporalNRParam* prm, const FrameYV12* src_frames,
+		bool proc(TemporalNRParam* prm, 
+            const FrameInfo* frame_info, const FrameYV12* src_frames,
             PIXEL_YCA* const * dst_frames, CUstream_st* stream);
 		// src,dstÇÕCPUÉÅÉÇÉä
 		bool proc(TemporalNRParam* param,
@@ -161,6 +162,31 @@ namespace cudafilter {
 			PIXEL_YC* src, PIXEL_YC* dst);
     private:
         EdgeLevelInternal* data;
+    };
+
+    struct CudaFilterParams {
+        bool enable_temporal_nr;
+        bool enable_banding;
+        bool enable_edgelevel;
+
+        YCAtoYUVParam convert_param;
+        TemporalNRParam temporal_nr_param;
+        BandingParam banding_param;
+        EdgeLevelParam edgelevel_param;
+    };
+
+    class CudaFiltersInternal;
+
+    class EXPORT CudaFilters {
+    public:
+        CudaFilters(const CudaFilterParams* params);
+        ~CudaFilters();
+
+        bool sendFrame(const FrameInfo* frame_info, const FrameYV12* frame);
+        int recvFrame();
+        bool flush();
+    private:
+        CudaFiltersInternal* data;
     };
 
 } // namespace cudafilter
